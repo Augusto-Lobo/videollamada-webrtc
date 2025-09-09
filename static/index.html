@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Videollamada WebRTC (Python + FastAPI)</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 24px; }
+    .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+    video { width: 100%; background: #000; border-radius: 12px; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    input, button { padding: 10px 12px; font-size: 16px; }
+    .status { margin-top: 8px; font-size: 14px; opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <h1>Videollamada 1 a 1 (WebRTC + FastAPI)</h1>
+  <div class="controls">
+    <input id="room" placeholder="Nombre de sala (ej: prueba)" />
+    <button id="join">Unirme a la sala</button>
+    <button id="call" disabled>Iniciar llamada</button>
+    <button id="hangup" disabled>Colgar</button>
+  </div>
+  <div class="grid">
+    <div>
+      <h3>Tu cámara</h3>
+      <video id="local" autoplay playsinline muted></video>
+    </div>
+    <div>
+      <h3>Remoto</h3>
+      <video id="remote" autoplay playsinline></video>
+    </div>
+  </div>
+  <div class="status" id="status">Estado: listo</div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const localVideo = document.getElementById('local');
+    const remoteVideo = document.getElementById('remote');
+    const joinBtn = document.getElementById('join');
+    const callBtn = document.getElementById('call');
+    const hangupBtn = document.getElementById('hangup');
+    const roomInput = document.getElementById('room');
+
+    let ws, pc, localStream;
+    let isCaller = false;
+
+    function setStatus(msg) { statusEl.textContent = 'Estado: ' + msg; }
+
+    async function initMedia() {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+    }
+
+    function createPeerConnection() {
+      pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: ['stun:stun.l.google.com:19302'] }, // STUN público
+          { urls: 'turn:turn.tuservidor.com:3478', username: 'usuario', credential: 'pass' } // TURN propio (opcional)
+        ]
+      });
+
+      // Manda tus pistas
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+      // Recibe pistas remotas
+      pc.ontrack = (event) => {
+        remoteVideo.srcObject = event.streams[0];
+      };
+
+      // Comparte candidatos ICE
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          ws.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
+        }
+      };
+
+      pc.onconnectionstatechange = () => setStatus(pc.connectionState);
+    }
+
+    joinBtn.onclick = async () => {
+      const room = roomInput.value.trim();
+      if (!room) { alert('Escribe un nombre de sala.'); return; }
+      await initMedia();
+      createPeerConnection();
+
+      const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(room)}`);
+
+      ws.onopen = () => {
+        setStatus('Conectado a la sala');
+        callBtn.disabled = false;
+        joinBtn.disabled = true;
+        roomInput.disabled = true;
+      };
+
+      ws.onmessage = async (msg) => {
+        const data = JSON.parse(msg.data);
+        if (data.type === 'offer') {
+          isCaller = false;
+          await pc.setRemoteDescription(new RTCSessionDescription(data));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(JSON.stringify(pc.localDescription));
+        } else if (data.type === 'answer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data));
+        } else if (data.type === 'candidate') {
+          try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch (e) { console.error(e); }
+        }
+      };
+
+      ws.onclose = () => setStatus('Desconectado');
+    };
+
+    callBtn.onclick = async () => {
+      isCaller = true;
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify(pc.localDescription));
+      callBtn.disabled = true;
+      hangupBtn.disabled = false;
+      setStatus('Llamando...');
+    };
+
+    hangupBtn.onclick = async () => {
+      if (pc) pc.close();
+      if (ws) ws.close();
+      callBtn.disabled = true;
+      hangupBtn.disabled = true;
+      joinBtn.disabled = false;
+      roomInput.disabled = false;
+      setStatus('Colgado');
+    };
+  </script>
+</body>
+</html>
